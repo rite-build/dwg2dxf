@@ -143,9 +143,9 @@ jobs:
                   ./autogen.sh
                   BREW_PREFIX=$(brew --prefix)
                   ICONV_PREFIX="$BREW_PREFIX/opt/libiconv"
-                  export LDFLAGS="-L$ICONV_PREFIX/lib"
+                  # Force static linking by using the .a file directly
+                  export LDFLAGS="-L$ICONV_PREFIX/lib $ICONV_PREFIX/lib/libiconv.a"
                   export CPPFLAGS="-I$ICONV_PREFIX/include"
-                  export LIBS="-liconv"
                   ./configure \
                     --prefix=/usr/local \
                     --disable-bindings \
@@ -153,7 +153,6 @@ jobs:
                     --disable-json \
                     --disable-python \
                     --with-libiconv-prefix="$ICONV_PREFIX" \
-                    --enable-static=yes \
                     --disable-shared
                   make -j$(sysctl -n hw.ncpu)
 
