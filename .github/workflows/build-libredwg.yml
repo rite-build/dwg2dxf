@@ -143,9 +143,9 @@ jobs:
                   ./autogen.sh
                   BREW_PREFIX=$(brew --prefix)
                   ICONV_PREFIX="$BREW_PREFIX/opt/libiconv"
-                  # Force static linking by using the .a file directly
-                  export LDFLAGS="-L$ICONV_PREFIX/lib $ICONV_PREFIX/lib/libiconv.a"
+                  # Force static linking by directly specifying the .a file in LIBS
                   export CPPFLAGS="-I$ICONV_PREFIX/include"
+                  export LIBS="$ICONV_PREFIX/lib/libiconv.a"
                   ./configure \
                     --prefix=/usr/local \
                     --disable-bindings \
