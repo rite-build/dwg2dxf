@@ -1,6 +1,9 @@
 name: Build LibreDWG
 
 on:
+    push:
+        branches:
+            - main
     workflow_dispatch:
         inputs:
             libredwg_version:
@@ -44,6 +47,7 @@ jobs:
         if: |
             always() && 
             (github.event_name == 'workflow_dispatch' || 
+            github.event_name == 'push' ||
             (github.event_name == 'schedule' && needs.check-new-release.outputs.should_build == 'true'))
         name: Build LibreDWG for ${{ matrix.platform }}
         runs-on: ${{ matrix.runner }}
@@ -59,6 +63,22 @@ jobs:
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
+
+            - name: Determine LibreDWG version
+              id: version
+              run: |
+                  if [ "${{ github.event_name }}" = "push" ]; then
+                      # For push events, get the latest LibreDWG release
+                      LATEST_VERSION=$(curl -s https://api.github.com/repos/LibreDWG/libredwg/releases/latest | jq -r .tag_name)
+                      echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+                      echo "Building latest version: $LATEST_VERSION"
+                  elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+                      echo "version=${{ inputs.libredwg_version }}" >> $GITHUB_OUTPUT
+                      echo "Building specified version: ${{ inputs.libredwg_version }}"
+                  else
+                      echo "version=${{ needs.check-new-release.outputs.latest_version }}" >> $GITHUB_OUTPUT
+                      echo "Building scheduled version: ${{ needs.check-new-release.outputs.latest_version }}"
+                  fi
 
             - name: Install build dependencies (Linux)
               if: matrix.platform == 'linux-arm64'
@@ -83,22 +103,37 @@ jobs:
 
             - name: Clone LibreDWG
               run: |
-                  VERSION=${{ needs.check-new-release.outputs.latest_version || inputs.libredwg_version }}
+                  VERSION=${{ steps.version.outputs.version }}
                   git clone --depth 1 --branch $VERSION \
                     https://github.com/LibreDWG/libredwg.git libredwg
+
+            - name: Build libiconv (Linux)
+              if: matrix.platform == 'linux-arm64'
+              run: |
+                  # Build libiconv statically to bundle it
+                  wget https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.17.tar.gz
+                  tar xzf libiconv-1.17.tar.gz
+                  cd libiconv-1.17
+                  ./configure --prefix=${{ github.workspace }}/libiconv-install --enable-static --disable-shared
+                  make -j$(nproc)
+                  make install
 
             - name: Build LibreDWG (Linux)
               if: matrix.platform == 'linux-arm64'
               working-directory: libredwg
               run: |
                   ./autogen.sh
+                  export LDFLAGS="-L${{ github.workspace }}/libiconv-install/lib"
+                  export CPPFLAGS="-I${{ github.workspace }}/libiconv-install/include"
                   ./configure \
                     --prefix=/usr/local \
                     --disable-bindings \
                     --disable-write \
                     --disable-json \
                     --disable-python \
-                    --with-libiconv
+                    --with-libiconv-prefix=${{ github.workspace }}/libiconv-install \
+                    --enable-static=yes \
+                    --disable-shared
                   make -j$(nproc)
 
             - name: Build LibreDWG (macOS)
@@ -117,7 +152,9 @@ jobs:
                     --disable-write \
                     --disable-json \
                     --disable-python \
-                    --with-libiconv-prefix="$ICONV_PREFIX"
+                    --with-libiconv-prefix="$ICONV_PREFIX" \
+                    --enable-static=yes \
+                    --disable-shared
                   make -j$(sysctl -n hw.ncpu)
 
             - name: Install LibreDWG
@@ -134,13 +171,24 @@ jobs:
                   # Copy all executables (dwg2dxf, dwgread, dwg2SVG, etc.)
                   cp -r install-root/usr/local/bin/* artifacts/${{ matrix.platform }}/bin/ || true
                   
-                  # Copy all libraries
-                  cp -r install-root/usr/local/lib/*.so* artifacts/${{ matrix.platform }}/lib/ 2>/dev/null || true
-                  cp -r install-root/usr/local/lib/*.dylib* artifacts/${{ matrix.platform }}/lib/ 2>/dev/null || true
+                  # Copy static libraries
                   cp -r install-root/usr/local/lib/*.a artifacts/${{ matrix.platform }}/lib/ 2>/dev/null || true
                   
                   # Copy shared data files if they exist
                   cp -r install-root/usr/local/share/libredwg artifacts/${{ matrix.platform }}/share/ 2>/dev/null || true
+                  
+                  # Verify binaries are self-contained
+                  echo "=== Checking binary dependencies ==="
+                  for bin in artifacts/${{ matrix.platform }}/bin/*; do
+                      if [ -f "$bin" ] && [ -x "$bin" ]; then
+                          echo "Checking $bin:"
+                          if [[ "${{ matrix.platform }}" == darwin-* ]]; then
+                              otool -L "$bin" || true
+                          else
+                              ldd "$bin" || true
+                          fi
+                      fi
+                  done
                   
                   # Create a README with usage instructions
                   cat > artifacts/${{ matrix.platform }}/README.md << 'EOF'
@@ -155,13 +203,11 @@ jobs:
                   
                   ## Usage
                   
-                  Extract the archive and add the `bin` directory to your PATH:
+                  These binaries are statically linked and self-contained. Simply extract and use:
                   
                   ```bash
                   tar -xzf libredwg-${{ matrix.platform }}.tar.gz
                   export PATH="$PWD/${{ matrix.platform }}/bin:$PATH"
-                  export LD_LIBRARY_PATH="$PWD/${{ matrix.platform }}/lib:$LD_LIBRARY_PATH"  # Linux
-                  export DYLD_LIBRARY_PATH="$PWD/${{ matrix.platform }}/lib:$DYLD_LIBRARY_PATH"  # macOS
                   ```
                   
                   Or install system-wide:
@@ -199,12 +245,14 @@ jobs:
             - name: Upload to Release
               uses: softprops/action-gh-release@v1
               with:
-                  tag_name: libredwg-${{ needs.check-new-release.outputs.latest_version || inputs.libredwg_version }}
-                  name: LibreDWG ${{ needs.check-new-release.outputs.latest_version || inputs.libredwg_version }}
+                  tag_name: libredwg-${{ steps.version.outputs.version }}
+                  name: LibreDWG ${{ steps.version.outputs.version }}
                   body: |
                       Prebuilt LibreDWG binaries for macOS ARM64 and Linux ARM64.
                       
-                      Upstream release: https://github.com/LibreDWG/libredwg/releases/tag/${{ needs.check-new-release.outputs.latest_version || inputs.libredwg_version }}
+                      **These binaries are statically linked and fully self-contained - no external dependencies required!**
+                      
+                      Upstream release: https://github.com/LibreDWG/libredwg/releases/tag/${{ steps.version.outputs.version }}
                   files: libredwg-${{ matrix.platform }}.tar.gz
                   draft: false
                   prerelease: false
